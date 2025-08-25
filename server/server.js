@@ -4,6 +4,9 @@ const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 require('dotenv').config();
+const multer = require('multer');
+const path = require('path');
+const Event = require('./models/event');
 
 const app = express();
 
@@ -77,6 +80,28 @@ const authenticateToken = (req, res, next) => {
     next();
   });
 };
+
+// Multer setup for poster uploads
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, path.join(__dirname, 'uploads'));
+  },
+  filename: function (req, file, cb) {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, uniqueSuffix + '-' + file.originalname);
+  }
+});
+
+const fileFilter = (req, file, cb) => {
+  // Accept only jpg, jpeg, png
+  if (/\.(jpg|jpeg|png)$/i.test(file.originalname)) {
+    cb(null, true);
+  } else {
+    cb(new Error('Only .jpg, .jpeg, .png files are allowed!'), false);
+  }
+};
+
+const upload = multer({ storage, fileFilter });
 
 // Routes
 
@@ -222,6 +247,71 @@ app.post('/api/student/login', async (req, res) => {
   }
 });
 
+// POST /api/events - Create a new event (Club Admin only)
+app.post('/api/events', authenticateToken, upload.single('poster'), async (req, res) => {
+  try {
+    if (req.user.type !== 'club') {
+      return res.status(403).json({ message: 'Only club admins can post events' });
+    }
+    const { title, description, dateTime, location, registrationLink, category } = req.body;
+    if (!title || title.length < 3) {
+      return res.status(400).json({ message: 'Title is required and must be at least 3 characters.' });
+    }
+    if (!description || description.split(/\s+/).length > 1000) {
+      return res.status(400).json({ message: 'Description is required and must be at most 1000 words' });
+    }
+    if (!dateTime) {
+      return res.status(400).json({ message: 'Date and time are required' });
+    }
+    if (!location) {
+      return res.status(400).json({ message: 'Location is required' });
+    }
+    if (!category) {
+      return res.status(400).json({ message: 'Category is required' });
+    }
+    let posterPath = undefined;
+    if (req.file) {
+      posterPath = `/uploads/${req.file.filename}`;
+    }
+    const clubName = req.user.clubName || req.user.username;
+    const event = new Event({
+      title,
+      description,
+      dateTime: new Date(dateTime),
+      venue: location,
+      poster: posterPath,
+      club: req.user.userId,
+      organizer: req.user.userId,
+      registrationLink,
+      category,
+      tags: [clubName]
+    });
+    await event.save();
+    res.status(201).json({ message: 'Event created successfully', event });
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// GET /api/events - Get all events
+app.get('/api/events', async (req, res) => {
+  try {
+    const events = await Event.find({})
+      .sort({ dateTime: -1 })
+      .lean();
+    // Make poster URLs absolute
+    const baseUrl = req.protocol + '://' + req.get('host');
+    events.forEach(event => {
+      if (event.poster && !event.poster.startsWith('http')) {
+        event.poster = baseUrl + event.poster;
+      }
+    });
+    res.json({ events });
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
 // Get all users (for debugging)
 app.get('/api/users', async (req, res) => {
   try {
@@ -236,6 +326,9 @@ app.get('/api/users', async (req, res) => {
 app.get('/api/profile', authenticateToken, (req, res) => {
   res.json({ user: req.user });
 });
+
+// Serve static files from uploads directory
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
